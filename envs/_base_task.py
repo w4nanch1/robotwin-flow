@@ -437,38 +437,60 @@ class Base_Task(gym.Env):
     def get_obs(self):
         self._update_render()
         self.cameras.update_picture()
+        camera_config = self.cameras.get_config()
+        selected_camera_names = self.data_type.get("camera_names")
+        if selected_camera_names is not None:
+            selected_camera_names = set(selected_camera_names)
+            camera_config = {
+                camera_name: config
+                for camera_name, config in camera_config.items()
+                if camera_name in selected_camera_names
+            }
         pkl_dic = {
-            "observation": {},
+            "observation": camera_config,
             "pointcloud": [],
             "joint_action": {},
             "endpose": {},
         }
 
-        pkl_dic["observation"] = self.cameras.get_config()
+        def update_camera_observations(camera_data):
+            for camera_name, values in camera_data.items():
+                if camera_name in pkl_dic["observation"]:
+                    pkl_dic["observation"][camera_name].update(values)
+
         # rgb
         if self.data_type.get("rgb", False):
-            rgb = self.cameras.get_rgb()
-            for camera_name in rgb.keys():
-                pkl_dic["observation"][camera_name].update(rgb[camera_name])
+            update_camera_observations(
+                self.cameras.get_rgb(self.data_type.get("rgb_camera_names"))
+            )
 
         if self.data_type.get("third_view", False):
             third_view_rgb = self.cameras.get_observer_rgb()
             pkl_dic["third_view_rgb"] = third_view_rgb
         # mesh_segmentation
         if self.data_type.get("mesh_segmentation", False):
-            mesh_segmentation = self.cameras.get_segmentation(level="mesh")
-            for camera_name in mesh_segmentation.keys():
-                pkl_dic["observation"][camera_name].update(mesh_segmentation[camera_name])
+            update_camera_observations(
+                self.cameras.get_segmentation(
+                    level="mesh", camera_names=self.data_type.get("mesh_segmentation_camera_names")
+                )
+            )
         # actor_segmentation
         if self.data_type.get("actor_segmentation", False):
-            actor_segmentation = self.cameras.get_segmentation(level="actor")
-            for camera_name in actor_segmentation.keys():
-                pkl_dic["observation"][camera_name].update(actor_segmentation[camera_name])
+            update_camera_observations(
+                self.cameras.get_segmentation(
+                    level="actor", camera_names=self.data_type.get("actor_segmentation_camera_names")
+                )
+            )
+        # Raw IDs are needed to map pixels to scene entities and rigid links.
+        if self.data_type.get("flow_segmentation", False):
+            update_camera_observations(
+                self.cameras.get_segmentation_ids(self.data_type.get("flow_camera_names"))
+            )
         # depth
         if self.data_type.get("depth", False):
-            depth = self.cameras.get_depth()
-            for camera_name in depth.keys():
-                pkl_dic["observation"][camera_name].update(depth[camera_name])
+            update_camera_observations(
+                self.cameras.get_depth(self.data_type.get("depth_camera_names"))
+            )
         # endpose
         if self.data_type.get("endpose", False):
             norm_gripper_val = [
@@ -496,8 +518,130 @@ class Base_Task(gym.Env):
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
 
+        if self.data_type.get("flow_state", False):
+            pkl_dic["flow_state"] = self.get_flow_state()
+
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
+
+    def get_flow_state(self):
+        """Build a per-frame, task-agnostic entity-ID to rigid-pose registry."""
+        roles = {}
+
+        def add_role(entity_id, role):
+            roles.setdefault(int(entity_id), set()).add(role)
+
+        def visit_role(role, value):
+            if isinstance(value, ArticulationActor):
+                for link in value.actor.get_links():
+                    add_role(link.entity.per_scene_id, role)
+            elif isinstance(value, Actor):
+                add_role(value.actor.per_scene_id, role)
+            elif isinstance(value, (list, tuple)):
+                for idx, item in enumerate(value):
+                    visit_role(f"{role}[{idx}]", item)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    visit_role(f"{role}[{key}]", item)
+
+        for attr_name, value in self.__dict__.items():
+            if not attr_name.startswith("_"):
+                visit_role(attr_name, value)
+
+        left_robot = getattr(self.robot, "left_entity", None)
+        right_robot = getattr(self.robot, "right_entity", None)
+        if left_robot is right_robot:
+            for link in left_robot.get_links():
+                add_role(link.entity.per_scene_id, "robot")
+        else:
+            for role, articulation in (("robot_left", left_robot), ("robot_right", right_robot)):
+                if articulation is not None:
+                    for link in articulation.get_links():
+                        add_role(link.entity.per_scene_id, role)
+
+        records = []
+        for entity in self.scene.get_all_actors():
+            entity_id = int(entity.per_scene_id)
+            name = entity.get_name() or "entity"
+            records.append({
+                "entity_id": entity_id,
+                "entity_name": name,
+                "instance_name": f"{name}#{entity_id}",
+                "articulation_name": "",
+                "link_name": "",
+                "body_type": "rigid_actor",
+                "task_role": "|".join(sorted(roles.get(entity_id, []))),
+                "pose": entity.get_pose().to_transformation_matrix(),
+            })
+
+        articulation_records = []
+        for articulation in self.scene.get_all_articulations():
+            links = articulation.get_links()
+            root_id = int(links[0].entity.per_scene_id)
+            articulation_roles = sorted(roles.get(root_id, []))
+            articulation_name = articulation.get_name() or (
+                articulation_roles[0] if articulation_roles else "articulation"
+            )
+            instance_name = f"{articulation_name}#{root_id}"
+            active_joints = articulation.get_active_joints()
+            articulation_records.append({
+                "instance_name": instance_name,
+                "root_entity_id": root_id,
+                "joint_names": [joint.get_name() for joint in active_joints],
+                "qpos": np.asarray(articulation.get_qpos(), dtype=np.float32),
+                "qvel": np.asarray(articulation.get_qvel(), dtype=np.float32),
+            })
+            for link in links:
+                entity_id = int(link.entity.per_scene_id)
+                records.append({
+                    "entity_id": entity_id,
+                    "entity_name": link.entity.get_name() or link.get_name(),
+                    "instance_name": instance_name,
+                    "articulation_name": articulation_name,
+                    "link_name": link.get_name(),
+                    "body_type": "articulation_link",
+                    "task_role": "|".join(sorted(roles.get(entity_id, []))),
+                    "pose": link.get_entity_pose().to_transformation_matrix(),
+                })
+
+        records.sort(key=lambda item: item["entity_id"])
+        articulation_records.sort(key=lambda item: item["root_entity_id"])
+        dof_offsets = [0]
+        qpos, qvel, joint_names = [], [], []
+        for articulation in articulation_records:
+            qpos.append(articulation["qpos"])
+            qvel.append(articulation["qvel"])
+            joint_names.extend(articulation["joint_names"])
+            dof_offsets.append(dof_offsets[-1] + len(articulation["qpos"]))
+
+        return {
+            "scene_entities": {
+                "entity_ids": np.asarray([item["entity_id"] for item in records], dtype=np.uint32),
+                "entity_names": [item["entity_name"] for item in records],
+                "instance_names": [item["instance_name"] for item in records],
+                "articulation_names": [item["articulation_name"] for item in records],
+                "link_names": [item["link_name"] for item in records],
+                "body_types": [item["body_type"] for item in records],
+                "task_roles": [item["task_role"] for item in records],
+                "poses_world": np.asarray([item["pose"] for item in records], dtype=np.float32),
+            },
+            "articulations": {
+                "instance_names": [item["instance_name"] for item in articulation_records],
+                "root_entity_ids": np.asarray(
+                    [item["root_entity_id"] for item in articulation_records], dtype=np.uint32
+                ),
+                "dof_offsets": np.asarray(dof_offsets, dtype=np.int32),
+                "joint_names": joint_names,
+                "qpos": np.concatenate(qpos) if qpos else np.empty(0, dtype=np.float32),
+                "qvel": np.concatenate(qvel) if qvel else np.empty(0, dtype=np.float32),
+            },
+            "grippers": {
+                "names": ["left_tcp", "right_tcp"],
+                "poses_world_xyz_wxyz": np.asarray(
+                    [self.robot.get_left_tcp_pose(), self.robot.get_right_tcp_pose()], dtype=np.float32
+                ),
+            },
+        }
 
     def save_camera_rgb(self, save_path, camera_name='head_camera'):
         self._update_render()

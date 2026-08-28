@@ -175,9 +175,14 @@ def create_xpolicylab_hdf5(data, hdf5_path, instructions, frequency):
                 "shape", data=np.asarray(colors[0].shape, dtype=np.int32)
             )
 
-            if "depth" in source_camera:
+            # A flow camera stores all T depth frames in /flow; avoid duplicating
+            # the first T-1 frames in the standard /vision layout.
+            if "depth" in source_camera and "entity_segmentation_id" not in source_camera:
                 target_camera.create_dataset(
-                    "depths", data=np.asarray(source_camera["depth"])[:-1]
+                    "depths",
+                    data=np.asarray(source_camera["depth"])[:-1],
+                    compression="lzf",
+                    shuffle=True,
                 )
 
             intrinsic = source_camera.get(
@@ -196,6 +201,89 @@ def create_xpolicylab_hdf5(data, hdf5_path, instructions, frequency):
             if extrinsic is not None:
                 target_camera.create_dataset(
                     "extrinsics_matrix", data=_to_4x4(extrinsic)[:-1]
+                )
+
+        flow_state = data.get("flow_state", {})
+        has_flow_segmentation = any(
+            "entity_segmentation_id" in camera for camera in observations.values()
+        )
+        if flow_state or has_flow_segmentation:
+            flow = f.create_group("flow")
+            flow.attrs["depth_unit"] = "millimeter"
+            flow.attrs["background_entity_id"] = np.uint32(0)
+            flow.attrs["entity_id_semantics"] = "SAPIEN per_scene_id"
+            flow.attrs["pose_convention"] = "4x4 local-to-world"
+            flow.attrs["tcp_pose_convention"] = "xyz + quaternion(wxyz), TCP-to-world"
+            flow.create_dataset("frame_indices", data=np.arange(frame_num, dtype=np.int32))
+
+            flow_cameras = flow.create_group("cameras")
+            for source_name, target_name in CAMERA_MAP.items():
+                if source_name not in observations:
+                    continue
+                source_camera = observations[source_name]
+                if "entity_segmentation_id" not in source_camera:
+                    continue
+                target_camera = flow_cameras.create_group(target_name)
+                for source_key, target_key in [
+                    ("depth", "depth_mm"),
+                    ("visual_segmentation_id", "visual_segmentation_ids"),
+                    ("entity_segmentation_id", "entity_segmentation_ids"),
+                    ("intrinsic_cv", "intrinsic_cv"),
+                    ("extrinsic_cv", "world_to_camera_cv"),
+                    ("cam2world_gl", "camera_to_world_gl"),
+                ]:
+                    if source_key not in source_camera:
+                        continue
+                    values = np.asarray(source_camera[source_key])
+                    kwargs = {"compression": "lzf", "shuffle": True} if values.ndim >= 3 else {}
+                    target_camera.create_dataset(target_key, data=values, **kwargs)
+                if "extrinsic_cv" in source_camera:
+                    world_to_camera = np.asarray(source_camera["extrinsic_cv"], dtype=np.float32)
+                    target_camera.create_dataset(
+                        "camera_to_world_cv", data=np.linalg.inv(_to_4x4(world_to_camera))
+                    )
+
+            def write_static_strings(group, key, values):
+                group.create_dataset(
+                    key, data=np.asarray(values[0], dtype=object), dtype=string_dtype
+                )
+
+            if "scene_entities" in flow_state:
+                source = flow_state["scene_entities"]
+                target = flow.create_group("scene_entities")
+                entity_ids = np.asarray(source["entity_ids"], dtype=np.uint32)
+                if not np.all(entity_ids == entity_ids[0]):
+                    raise ValueError("Scene entity IDs changed within an episode")
+                target.create_dataset("entity_ids", data=entity_ids[0])
+                for key in (
+                    "entity_names", "instance_names", "articulation_names",
+                    "link_names", "body_types", "task_roles",
+                ):
+                    write_static_strings(target, key, source[key])
+                target.create_dataset(
+                    "poses_world", data=np.asarray(source["poses_world"], dtype=np.float32)
+                )
+
+            if "articulations" in flow_state:
+                source = flow_state["articulations"]
+                target = flow.create_group("articulations")
+                for key in ("instance_names", "joint_names"):
+                    write_static_strings(target, key, source[key])
+                for key in ("root_entity_ids", "dof_offsets"):
+                    values = np.asarray(source[key])
+                    if not np.all(values == values[0]):
+                        raise ValueError(f"Articulation metadata changed: {key}")
+                    target.create_dataset(key, data=values[0])
+                target.create_dataset("qpos", data=np.asarray(source["qpos"], dtype=np.float32))
+                target.create_dataset("qvel", data=np.asarray(source["qvel"], dtype=np.float32))
+
+            if "grippers" in flow_state:
+                source = flow_state["grippers"]
+                target = flow.create_group("grippers")
+                write_static_strings(target, "names", source["names"])
+                target.create_dataset(
+                    "poses_world_xyz_wxyz",
+                    data=np.asarray(source["poses_world_xyz_wxyz"], dtype=np.float32),
                 )
 
     return frame_num - 1

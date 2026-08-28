@@ -292,6 +292,10 @@ class Camera:
             self.left_camera.entity.set_pose(left_pose)
             self.right_camera.entity.set_pose(right_pose)
 
+    @staticmethod
+    def _camera_selected(camera_name, camera_names):
+        return camera_names is None or camera_name in camera_names
+
     def get_config(self) -> dict:
         res = {}
 
@@ -320,8 +324,8 @@ class Camera:
         # print(res)
         return res
 
-    def get_rgb(self) -> dict:
-        rgba = self.get_rgba()
+    def get_rgb(self, camera_names=None) -> dict:
+        rgba = self.get_rgba(camera_names)
         rgb = {}
         for camera_name, camera_data in rgba.items():
             rgb[camera_name] = {}
@@ -329,7 +333,7 @@ class Camera:
         return rgb
     
     # Get Camera RGBA
-    def get_rgba(self) -> dict:
+    def get_rgba(self, camera_names=None) -> dict:
 
         def _get_rgba(camera):
             camera_rgba = camera.get_picture("Color")
@@ -344,13 +348,14 @@ class Camera:
 
         res = {}
 
-        if self.collect_wrist_camera:
-            res["left_camera"] = {}
-            res["right_camera"] = {}
-            res["left_camera"]["rgba"] = _get_rgba(self.left_camera)
-            res["right_camera"]["rgba"] = _get_rgba(self.right_camera)
+        if self.collect_wrist_camera and self._camera_selected("left_camera", camera_names):
+            res["left_camera"] = {"rgba": _get_rgba(self.left_camera)}
+        if self.collect_wrist_camera and self._camera_selected("right_camera", camera_names):
+            res["right_camera"] = {"rgba": _get_rgba(self.right_camera)}
 
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if not self._camera_selected(camera_name, camera_names):
+                continue
             if camera_name == "head_camera":
                 if self.collect_head_camera:
                     res[camera_name] = {}
@@ -374,7 +379,7 @@ class Camera:
         return _get_rgb(self.observer_camera)
 
     # Get Camera Segmentation
-    def get_segmentation(self, level="mesh") -> dict:
+    def get_segmentation(self, level="mesh", camera_names=None) -> dict:
 
         def _get_segmentation(camera, level="mesh"):
             # visual_id is the unique id of each visual shape
@@ -392,13 +397,18 @@ class Camera:
             # 'right_camera':{}
         }
 
-        if self.collect_wrist_camera:
-            res["left_camera"] = {}
-            res["right_camera"] = {}
-            res["left_camera"][f"{level}_segmentation"] = _get_segmentation(self.left_camera, level=level)
-            res["right_camera"][f"{level}_segmentation"] = _get_segmentation(self.right_camera, level=level)
+        if self.collect_wrist_camera and self._camera_selected("left_camera", camera_names):
+            res["left_camera"] = {
+                f"{level}_segmentation": _get_segmentation(self.left_camera, level=level)
+            }
+        if self.collect_wrist_camera and self._camera_selected("right_camera", camera_names):
+            res["right_camera"] = {
+                f"{level}_segmentation": _get_segmentation(self.right_camera, level=level)
+            }
 
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if not self._camera_selected(camera_name, camera_names):
+                continue
             if camera_name == "head_camera":
                 if self.collect_head_camera:
                     res[camera_name] = {}
@@ -408,8 +418,31 @@ class Camera:
                 res[camera_name][f"{level}_segmentation"] = _get_segmentation(camera, level=level)
         return res
 
+    def get_segmentation_ids(self, camera_names=None) -> dict:
+        """Return raw SAPIEN visual/entity IDs without colorizing them."""
+
+        def _get_segmentation_ids(camera):
+            labels = camera.get_picture("Segmentation")
+            return {
+                "visual_segmentation_id": labels[..., 0].astype(np.uint32),
+                "entity_segmentation_id": labels[..., 1].astype(np.uint32),
+            }
+
+        res = {}
+        if self.collect_wrist_camera and self._camera_selected("left_camera", camera_names):
+            res["left_camera"] = _get_segmentation_ids(self.left_camera)
+        if self.collect_wrist_camera and self._camera_selected("right_camera", camera_names):
+            res["right_camera"] = _get_segmentation_ids(self.right_camera)
+
+        for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if not self._camera_selected(camera_name, camera_names):
+                continue
+            if camera_name != "head_camera" or self.collect_head_camera:
+                res[camera_name] = _get_segmentation_ids(camera)
+        return res
+
     # Get Camera Depth
-    def get_depth(self) -> dict:
+    def get_depth(self, camera_names=None) -> dict:
 
         def _get_depth(camera):
             position = camera.get_picture("Position")
@@ -423,17 +456,18 @@ class Camera:
             return depth
 
         res = {}
-        rgba = self.get_rgba()
+        rgba = self.get_rgba(camera_names)
 
-        if self.collect_wrist_camera:
-            res["left_camera"] = {}
-            res["right_camera"] = {}
-            res["left_camera"]["depth"] = _get_depth(self.left_camera)
-            res["right_camera"]["depth"] = _get_depth(self.right_camera)
+        if self.collect_wrist_camera and self._camera_selected("left_camera", camera_names):
+            res["left_camera"] = {"depth": _get_depth(self.left_camera)}
             res["left_camera"]["depth"] *= rgba["left_camera"]["rgba"][:, :, 3] / 255
+        if self.collect_wrist_camera and self._camera_selected("right_camera", camera_names):
+            res["right_camera"] = {"depth": _get_depth(self.right_camera)}
             res["right_camera"]["depth"] *= rgba["right_camera"]["rgba"][:, :, 3] / 255
-        
+
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if not self._camera_selected(camera_name, camera_names):
+                continue
             if camera_name == "head_camera":
                 if self.collect_head_camera:
                     res[camera_name] = {}

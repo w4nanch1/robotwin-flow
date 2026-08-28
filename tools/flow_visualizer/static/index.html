@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RoboTwin · Flow Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div>
+        <h1>Flow Lab</h1>
+        <p>RoboTwin scene motion inspector</p>
+      </div>
+    </div>
+    <div class="source-controls">
+      <label>
+        <span>数据集</span>
+        <select id="fileSelect"><option value="">正在扫描…</option></select>
+      </label>
+      <label>
+        <span>相机</span>
+        <select id="cameraSelect" disabled></select>
+      </label>
+      <button id="reloadButton" class="icon-button" title="重新扫描 HDF5" aria-label="重新扫描">↻</button>
+    </div>
+    <div id="statusPill" class="status-pill loading"><i></i><span>初始化</span></div>
+  </header>
+
+  <main>
+    <section id="emptyState" class="empty-state hidden">
+      <div class="empty-glyph">↝</div>
+      <h2>还没有可视化的数据</h2>
+      <p id="emptyMessage">在启动命令的 <code>--data</code> 路径中没有找到 HDF5。</p>
+      <pre>python3 tools/flow_visualizer/generate_demo.py
+python3 tools/flow_visualizer/server.py --data data tools/flow_visualizer/demo</pre>
+    </section>
+
+    <div id="workspace" class="workspace hidden">
+      <aside class="sidebar">
+        <section class="panel control-panel">
+          <div class="panel-heading">
+            <div><span class="eyebrow">PLAYBACK</span><h2>时序控制</h2></div>
+            <span id="framePair" class="frame-pair">0 → 1</span>
+          </div>
+          <div class="transport">
+            <button id="prevButton" aria-label="上一帧">−1</button>
+            <button id="playButton" class="play" aria-label="播放">▶</button>
+            <button id="nextButton" aria-label="下一帧">+1</button>
+            <label class="fps"><input id="fpsInput" type="number" min="1" max="30" value="8"><span>FPS</span></label>
+          </div>
+          <input id="frameSlider" class="timeline" type="range" min="0" max="0" value="0">
+          <div class="timeline-labels"><span>FRAME 0</span><span id="lastFrameLabel">FRAME 0</span></div>
+        </section>
+
+        <section class="panel settings-panel">
+          <div class="panel-heading"><div><span class="eyebrow">RENDER</span><h2>显示参数</h2></div></div>
+          <label class="setting-row">
+            <span><b>Flow 上限</b><small>0 = P95 自动缩放</small></span>
+            <span class="value-field"><input id="maximumInput" type="number" min="0" step="1" value="0"><em>px</em></span>
+          </label>
+          <label class="setting-row">
+            <span><b>叠加透明度</b><small>颜色层权重</small></span>
+            <span class="value-field"><input id="opacityInput" type="number" min="0" max="1" step="0.05" value="0.7"></span>
+          </label>
+          <label class="setting-row">
+            <span><b>箭头间距</b><small>0 = 不显示箭头</small></span>
+            <span class="value-field"><input id="arrowInput" type="number" min="0" max="100" step="2" value="24"><em>px</em></span>
+          </label>
+          <label class="setting-row">
+            <span><b>遮挡阈值</b><small>与下一帧深度比较</small></span>
+            <span class="value-field"><input id="thresholdInput" type="number" min="0" max="50" step="0.5" value="2"><em>cm</em></span>
+          </label>
+          <label class="switch-row">
+            <span><b>隐藏遮挡 flow</b><small>保留几何有效、当前可见的像素</small></span>
+            <input id="occlusionInput" type="checkbox" checked><i></i>
+          </label>
+        </section>
+
+      </aside>
+
+      <section class="content">
+        <div class="metrics">
+          <article><span>MEAN FLOW</span><strong id="meanMetric">—</strong><small>pixels</small></article>
+          <article><span>P95 FLOW</span><strong id="p95Metric">—</strong><small>pixels</small></article>
+          <article><span>VALID PIXELS</span><strong id="validMetric">—</strong><small id="validDetail">visible</small></article>
+          <article><span>OCCLUDED</span><strong id="occludedMetric">—</strong><small>pixels</small></article>
+        </div>
+
+        <div class="viewer-grid">
+          <article class="viewer viewer-main" data-view="overlay">
+            <header><div><i class="cyan"></i><h3>RGB + FLOW</h3></div><span>方向 / 幅值叠加</span></header>
+            <div class="image-wrap"><img alt="RGB 与 flow 叠加"><div class="image-loading">CALCULATING</div></div>
+          </article>
+          <article class="viewer" data-view="flow">
+            <header><div><i class="violet"></i><h3>FLOW FIELD</h3></div><span>方向 / 幅值</span></header>
+            <div class="image-wrap"><img alt="光流颜色编码"><div class="image-loading">CALCULATING</div></div>
+          </article>
+          <article class="viewer" data-view="depth">
+            <header><div><i class="orange"></i><h3>DEPTH</h3></div><span>当前帧 · meters</span></header>
+            <div class="image-wrap"><img alt="深度图"><div class="image-loading">CALCULATING</div></div>
+          </article>
+          <article class="viewer" data-view="segmentation">
+            <header><div><i class="green"></i><h3>ENTITY SEGMENTATION</h3></div><span>per_scene_id</span></header>
+            <div class="image-wrap"><img alt="实体分割 ID"><div class="image-loading">CALCULATING</div></div>
+          </article>
+        </div>
+
+        <div class="lower-grid">
+          <section class="panel legend-panel">
+            <div class="panel-heading"><div><span class="eyebrow">ENCODING</span><h2>Flow 颜色</h2></div></div>
+            <div class="flow-legend"><div class="flow-wheel"><span>0</span></div><div><b>色相 = 运动方向</b><p>亮度 = 相对幅值。显示上限以上的幅值会饱和。</p><div class="direction-labels"><span>← −X</span><span>+Y ↓</span><span>+X →</span><span>↑ −Y</span></div></div></div>
+          </section>
+          <section class="panel entities-panel">
+            <div class="panel-heading"><div><span class="eyebrow">VISIBLE SET</span><h2>当前实体</h2></div><span id="entityCount">0 entities</span></div>
+            <div id="entityList" class="entity-list"></div>
+          </section>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js?v=5"></script>
+</body>
+</html>
